@@ -65,7 +65,7 @@ class user_actions:
         escaped_path = path.replace(r'"', r"\"")
         applescript.run(
             rf"""
-            tell application id "{settings.get('user.preferred_terminal')}"
+            tell application id "{settings.get("user.preferred_terminal")}"
                 activate
                 open "{escaped_path}"
             end tell
@@ -73,22 +73,24 @@ class user_actions:
         )
 
 
-@ctx.action_class("edit")
-class Actions:
-    """Default macOS implementations for edit actions"""
+# Disabled because this causes problems in Chrome where selected_text() may be
+# an invisible character.
+# @ctx.action_class("edit")
+# class Actions:
+#     """Default macOS implementations for edit actions"""
 
-    def selected_text() -> str:
-        try:
-            selected_text = ui.focused_element().AXSelectedText
-            if not selected_text:
-                # Some partially-accessible applications incorrectly report empty selections sometimes, and this can be
-                # quite bad depending on the use case. For maximum safety we have to fall back to the clipboard
-                # implementation in this case. This could be customized if we knew the application was fully
-                # trustworthy.
-                #
-                # See https://github.com/phillco/talon-axkit/issues/59
-                return actions.next()
+#     def selected_text() -> str:
+#         try:
+#             selected_text = ui.focused_element().AXSelectedText
+#             if not selected_text:
+#                 # Some partially-accessible applications incorrectly report empty selections sometimes, and this can be
+#                 # quite bad depending on the use case. For maximum safety we have to fall back to the clipboard
+#                 # implementation in this case. This could be customized if we knew the application was fully
+#                 # trustworthy.
+#                 #
+#                 # See https://github.com/phillco/talon-axkit/issues/59
+#                 return actions.next()
 
-            return selected_text
-        except Exception:
-            return actions.next()
+#             return selected_text
+#         except Exception:
+#             return actions.next()
