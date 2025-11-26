@@ -1,3 +1,5 @@
+mode: command
+mode: user.dictation_command
 os: mac
 -
 ^(note | notification) <number_small> {user.notification_actions}$:
