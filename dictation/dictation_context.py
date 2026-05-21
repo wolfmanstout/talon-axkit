@@ -58,18 +58,7 @@ class ModActions:
         This is almost always the focused (current) element, however, this action
         exists so that context can overwrite it, for applications with strange behavior.
         """
-        try:
-            return ui.focused_element()
-        except RuntimeError:
-            # Chromium/Electron apps may not build their renderer AX tree until
-            # accessibility support is explicitly enabled. Electron documents
-            # this AX attribute as its third-party macOS opt-in.
-            app = ui.active_app().element
-            try:
-                app["AXManualAccessibility"] = True
-            except Exception:
-                pass
-            return ui.focused_element()
+        return ui.focused_element()
 
     def accessibility_adjust_context_for_application(
         el: Element, context: AccessibilityContext
