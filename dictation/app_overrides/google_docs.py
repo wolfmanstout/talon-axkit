@@ -82,18 +82,27 @@ class Actions:
         if context.content is None:
             return context
 
+        # Docs reports <0-0> after clicking into some empty list items, even
+        # when the caret is far from the start of the exposed content. Since
+        # this is indistinguishable from a real start-of-content caret, fall
+        # back to the cursor-based context lookup for either case.
+        if context.selection.left == 0 and context.selection.right == 0:
+            context.content = None
+            return context
+
         # Docs includes AXListMarker separator spaces in AXValue, but omits
         # them from AXSelectedTextRange offsets, except for a marker starting
         # the exposed AXValue. Only normalize content when the accessibility
         # tree accounts for the whole AXValue.
         raw_tree_content = text_area_content_from_tree(el)
-        if raw_tree_content == context.content:
-            context.content = text_area_content_from_tree(
-                el,
-                normalize_list_markers=True,
-                preserve_first_list_marker_separator=content_starts_with_list_marker(
-                    el
-                ),
-            )
+        if raw_tree_content != context.content:
+            context.content = None
+            return context
+
+        context.content = text_area_content_from_tree(
+            el,
+            normalize_list_markers=True,
+            preserve_first_list_marker_separator=content_starts_with_list_marker(el),
+        )
 
         return context
