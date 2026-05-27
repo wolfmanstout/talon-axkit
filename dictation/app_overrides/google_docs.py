@@ -8,14 +8,34 @@ app: google_docs
 mod = Module()
 
 
-def text_from_tree(el, normalize_list_markers=False):
+def text_from_tree(
+    el,
+    normalize_list_markers=False,
+    preserve_first_list_marker_separator=False,
+    list_marker_count=None,
+):
+    if list_marker_count is None:
+        list_marker_count = [0]
+
     role = el.get("AXRole")
     if role == "AXListMarker":
         marker = el.get("AXValue") or ""
-        return marker.removesuffix(" ") if normalize_list_markers else marker
+        preserve_separator = (
+            preserve_first_list_marker_separator and list_marker_count[0] == 0
+        )
+        list_marker_count[0] += 1
+        if normalize_list_markers and not preserve_separator:
+            return marker.removesuffix(" ")
+        return marker
 
     child_text = [
-        text_from_tree(child, normalize_list_markers) for child in list(el.children)
+        text_from_tree(
+            child,
+            normalize_list_markers,
+            preserve_first_list_marker_separator,
+            list_marker_count,
+        )
+        for child in list(el.children)
     ]
     if role == "AXList":
         return "\n".join(child_text)
@@ -25,10 +45,35 @@ def text_from_tree(el, normalize_list_markers=False):
     return el.get("AXValue") or ""
 
 
-def text_area_content_from_tree(el, normalize_list_markers=False):
+def text_area_content_from_tree(
+    el, normalize_list_markers=False, preserve_first_list_marker_separator=False
+):
+    list_marker_count = [0]
     return "\n".join(
-        text_from_tree(child, normalize_list_markers) for child in list(el.children)
+        text_from_tree(
+            child,
+            normalize_list_markers,
+            preserve_first_list_marker_separator,
+            list_marker_count,
+        )
+        for child in list(el.children)
     )
+
+
+def content_starts_with_list_marker(el):
+    elements = list(el.children)
+    while elements:
+        first = elements.pop(0)
+        if first.get("AXRole") == "AXListMarker":
+            return True
+
+        children = list(first.children)
+        if children:
+            elements[0:0] = children
+        elif first.get("AXValue"):
+            return False
+
+    return False
 
 
 @ctx.action_class("user")
@@ -38,12 +83,17 @@ class Actions:
             return context
 
         # Docs includes AXListMarker separator spaces in AXValue, but omits
-        # them from AXSelectedTextRange offsets. Only normalize content when
-        # the accessibility tree accounts for the whole AXValue.
+        # them from AXSelectedTextRange offsets, except for a marker starting
+        # the exposed AXValue. Only normalize content when the accessibility
+        # tree accounts for the whole AXValue.
         raw_tree_content = text_area_content_from_tree(el)
         if raw_tree_content == context.content:
             context.content = text_area_content_from_tree(
-                el, normalize_list_markers=True
+                el,
+                normalize_list_markers=True,
+                preserve_first_list_marker_separator=content_starts_with_list_marker(
+                    el
+                ),
             )
 
         return context
