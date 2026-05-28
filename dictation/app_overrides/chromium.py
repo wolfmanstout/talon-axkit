@@ -3,8 +3,9 @@ from talon import app, ui
 
 def enable_manual_accessibility(active_app: ui.App):
     try:
-        # Electron documents this AX attribute as its third-party macOS opt-in.
-        active_app.element["AXManualAccessibility"] = True
+        # This is sufficient to enable accessibility in Chromium apps, including
+        # Electron apps.
+        _ = active_app.element.AXRole
     except Exception:
         pass
 
