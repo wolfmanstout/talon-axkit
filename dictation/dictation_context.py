@@ -1,3 +1,4 @@
+import logging
 import traceback
 from dataclasses import dataclass
 from enum import Enum
@@ -118,6 +119,9 @@ class Actions:
     """Wires this into the knausj dictation formatter"""
 
     def dictation_peek(left, right):
+        # Allow time to settle if there were recent changes. Needed in Chrome
+        # (Gmail and Chat).
+        actions.sleep("50ms")
         before, after = None, None
 
         try:
@@ -145,4 +149,6 @@ class Actions:
             # Fallback to the original (keystrokes) knausj method.
             return actions.next(left, right)
 
+        if settings.get("user.dictation_debug_mode"):
+            logging.debug("axkit dictation_peek before: %r, after: %r", before, after)
         return before, after
