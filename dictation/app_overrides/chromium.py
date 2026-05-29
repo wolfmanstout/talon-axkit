@@ -11,6 +11,7 @@ def enable_manual_accessibility(active_app: ui.App):
 
 
 def on_ready():
+    # Enable in all apps. This operation is harmless on non-Chromium apps.
     ui.register("app_activate", enable_manual_accessibility)
     enable_manual_accessibility(ui.active_app())
 
