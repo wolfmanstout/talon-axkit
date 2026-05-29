@@ -76,6 +76,30 @@ def content_starts_with_list_marker(el):
     return False
 
 
+def list_markers_from_tree(el):
+    markers = set()
+    elements = list(el.children)
+    while elements:
+        first = elements.pop(0)
+        if first.get("AXRole") == "AXListMarker":
+            marker = first.get("AXValue")
+            if marker:
+                markers.add(marker)
+
+        elements[0:0] = list(first.children)
+
+    return markers
+
+
+def content_after_selection_has_empty_list_item(el, context):
+    content_after_selection = context.content[context.selection.left :]
+    return any(
+        f"\n{marker}\n" in content_after_selection
+        or content_after_selection.startswith(f"{marker}\n")
+        for marker in list_markers_from_tree(el)
+    )
+
+
 @ctx.action_class("user")
 class Actions:
     def accessibility_adjust_context_for_application(el, context):
@@ -87,6 +111,13 @@ class Actions:
         # this is indistinguishable from a real start-of-content caret, fall
         # back to the cursor-based context lookup for either case.
         if context.selection.left == 0 and context.selection.right == 0:
+            context.content = None
+            return context
+
+        # At the start of a new empty list item, Docs can report a stale
+        # selection offset from earlier text. The empty marker line is still in
+        # AXValue, so fall back rather than using the stale offset.
+        if content_after_selection_has_empty_list_item(el, context):
             context.content = None
             return context
 
