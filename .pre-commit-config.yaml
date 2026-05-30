@@ -19,8 +19,8 @@ repos:
     hooks:
       - id: prettier
         files: ".*.(md|json|yaml)$"
-  - repo: https://github.com/ikamensh/flynt/
-    rev: "0.78"
+  - repo: https://github.com/ikamensh/flynt
+    rev: "1.0.6"
     hooks:
       - id: flynt
   - repo: https://github.com/Lucas-C/pre-commit-hooks
