@@ -9,9 +9,7 @@ ctx = Context()
 # keystroke fallback rather than producing a wrong context.
 ctx.matches = r"""
 os: mac
-app: chrome
-title: / - Chat/
-title: /^Chat\b/
+app: google chat
 """
 mod = Module()
 
