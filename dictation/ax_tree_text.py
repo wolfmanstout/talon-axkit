@@ -355,3 +355,79 @@ def apply_chromium_text_model(el, context):
         offset_to_text_index(segments, selection.right),
     )
     return context
+
+
+def _repr_text(text, limit=80):
+    if text is None:
+        return "None"
+    value = repr(text)
+    if len(value) <= limit:
+        return value
+    return value[: limit - 4] + "...'"
+
+
+def chromium_text_model_debug_lines(el, context=None, max_segments=160):
+    """Return human-readable diagnostics for the Chromium AX text model."""
+    model = _TreeModel().build(el)
+    segments = model.segments
+    ax_text = segment_text(segments, "ax_text")
+    peek_text = segment_text(segments, "peek_text")
+    offset_text = segment_text(segments, "offset_text")
+
+    lines = [
+        "Chromium text model:",
+        f"  segments={len(segments)} lists={len(model.lists)}",
+        f"  ax_text_len={len(ax_text)} ax_text_utf16={utf16_len(ax_text)}",
+        f"  peek_text_len={len(peek_text)} peek_text_utf16={utf16_len(peek_text)}",
+        f"  offset_text_len={len(offset_text)} offset_text_utf16={utf16_len(offset_text)}",
+    ]
+
+    if context is not None:
+        lines.append(f"  validates_ax_value={ax_text == context.content}")
+        selection = context.selection
+        if selection is None:
+            lines.append("  selection=None")
+        else:
+            lines.append(f"  raw_selection={selection}")
+            if selection.left == selection.right:
+                resolution = _resolve_collapsed_selection(model, selection.left)
+                if resolution is _FALLBACK:
+                    lines.append("  collapsed_selection_resolution=FALLBACK")
+                elif resolution is None:
+                    lines.append("  collapsed_selection_resolution=unchanged")
+                else:
+                    lines.append(
+                        f"  collapsed_selection_resolution=remap_to_{resolution}"
+                    )
+                    selection = Span(resolution, resolution)
+            lines.append(
+                "  mapped_selection="
+                f"<{offset_to_text_index(segments, selection.left)}-"
+                f"{offset_to_text_index(segments, selection.right)}>"
+            )
+
+    lines.append("  segment table:")
+    ax_units = 0
+    peek_index = 0
+    offset_units = 0
+    for index, segment in enumerate(segments[:max_segments]):
+        segment_ax_units = utf16_len(segment.ax_text)
+        segment_offset_units = utf16_len(segment.offset_text)
+        lines.append(
+            "    "
+            f"{index:03d} kind={segment.kind} bias_after={segment.bias_after} "
+            f"ax[{ax_units}:{ax_units + segment_ax_units}] "
+            f"peek[{peek_index}:{peek_index + len(segment.peek_text)}] "
+            f"offset[{offset_units}:{offset_units + segment_offset_units}] "
+            f"ax={_repr_text(segment.ax_text)} "
+            f"peek={_repr_text(segment.peek_text)} "
+            f"offset={_repr_text(segment.offset_text)}"
+        )
+        ax_units += segment_ax_units
+        peek_index += len(segment.peek_text)
+        offset_units += segment_offset_units
+
+    if len(segments) > max_segments:
+        lines.append(f"    ... {len(segments) - max_segments} more segments omitted")
+
+    return lines

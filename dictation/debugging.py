@@ -1,7 +1,15 @@
 import time
 import traceback
+from dataclasses import replace
 
 from talon import Module, actions, cron, noise, settings, ui
+from talon.types import Span
+
+from .ax_tree_text import chromium_text_model_debug_lines
+from .dictation_context import (
+    DEFAULT_CONTEXT_CHARACTERS,
+    AccessibilityContext,
+)
 
 try:
     from talon.ui import Element
@@ -23,6 +31,123 @@ mod.setting(
     default=0.35,
     desc="If hiss_to_debug_accessibility is enabled, the hissing duration (in seconds) needed to trigger the debug output.",
 )
+
+
+def _safe_get(el, attr):
+    try:
+        return el.get(attr)
+    except Exception as error:
+        return f"<{type(error).__name__}: {error}>"
+
+
+def _text_excerpt(text, index=None, radius=DEFAULT_CONTEXT_CHARACTERS):
+    if text is None:
+        return "None"
+
+    if index is None:
+        start = 0
+        end = min(len(text), radius * 2)
+    else:
+        start = max(0, index - radius)
+        end = min(len(text), index + radius)
+
+    prefix = "..." if start else ""
+    suffix = "..." if end < len(text) else ""
+    return prefix + repr(text[start:end]) + suffix
+
+
+def _span_text_window(label, content, selection, radius):
+    if content is None:
+        return [f"{label}: content=None"]
+    if selection is None:
+        return [f"{label}: selection=None content_len={len(content)}"]
+
+    return [
+        f"{label}: content_len={len(content)} selection={selection}",
+        f"  before={_text_excerpt(content, selection.left, radius)}",
+        f"  selected={repr(content[selection.left : selection.right])}",
+        f"  after={_text_excerpt(content, selection.right, radius)}",
+    ]
+
+
+def _raw_context_from_element(el):
+    selection = _safe_get(el, "AXSelectedTextRange")
+    if selection is None or not hasattr(selection, "a"):
+        selection = Span(0, 0)
+
+    shared_range = _safe_get(el, "AXSharedCharacterRange")
+    if shared_range and hasattr(shared_range, "a"):
+        selection = Span(selection.a - shared_range.a, selection.b - shared_range.a)
+
+    return AccessibilityContext(content=_safe_get(el, "AXValue"), selection=selection)
+
+
+def _element_summary(el):
+    fields = [
+        "AXRole",
+        "AXSubrole",
+        "AXTitle",
+        "AXDescription",
+        "AXValue",
+        "AXSelectedTextRange",
+        "AXSharedCharacterRange",
+        "AXNumberOfCharacters",
+        "AXVisibleCharacterRange",
+        "AXInsertionPointLineNumber",
+    ]
+    lines = [f"Focused element: {el}"]
+    for field in fields:
+        value = _safe_get(el, field)
+        if field == "AXValue":
+            lines.append(
+                f"  {field}: len={len(value) if isinstance(value, str) else 'n/a'} "
+                f"{_text_excerpt(value, radius=120)}"
+            )
+        else:
+            lines.append(f"  {field}: {value!r}")
+    return lines
+
+
+def _tree_lines(el, max_depth=8, max_nodes=220, text_limit=100):
+    lines = ["AX tree:"]
+    remaining = {"nodes": max_nodes}
+
+    def walk(node, depth):
+        if remaining["nodes"] <= 0:
+            return
+        remaining["nodes"] -= 1
+
+        role = _safe_get(node, "AXRole")
+        value = _safe_get(node, "AXValue")
+        description = _safe_get(node, "AXDescription")
+        title = _safe_get(node, "AXTitle")
+        parts = [f"role={role!r}"]
+        if title:
+            parts.append(f"title={_text_excerpt(str(title), radius=text_limit // 2)}")
+        if description:
+            parts.append(
+                f"description={_text_excerpt(str(description), radius=text_limit // 2)}"
+            )
+        if value:
+            parts.append(f"value={_text_excerpt(str(value), radius=text_limit // 2)}")
+        lines.append(f"  {'  ' * depth}- " + " ".join(parts))
+
+        if depth >= max_depth:
+            children = list(node.children)
+            if children:
+                lines.append(
+                    f"  {'  ' * (depth + 1)}... depth limit, {len(children)} children"
+                )
+            return
+
+        for child in list(node.children):
+            if remaining["nodes"] <= 0:
+                lines.append("  ... node limit reached")
+                return
+            walk(child, depth + 1)
+
+    walk(el, 0)
+    return lines
 
 
 @mod.action_class
@@ -49,6 +174,72 @@ class Actions:
             console.print(attributed, markup=False)
         except Exception as e:
             print(f'Exception while debugging accessibility: "{e}":')
+            traceback.print_exc()
+
+    def debug_dictation_context(
+        radius: int = 300, tree_depth: int = 8, max_nodes: int = 220
+    ):
+        """Prints detailed dictation accessibility context and offset mapping diagnostics."""
+
+        try:
+            el = actions.user.dictation_current_element()
+            raw_context = _raw_context_from_element(el)
+            adjusted_context = (
+                actions.user.accessibility_adjust_context_for_application(
+                    el, replace(raw_context)
+                )
+            )
+
+            print("\n=== axkit dictation context debug ===")
+            app = ui.active_app()
+            window = ui.active_window()
+            print(f"active_app={app}")
+            print(f"active_window={window}")
+            print(
+                "settings: "
+                f"accessibility_dictation={settings.get('user.accessibility_dictation')} "
+                f"dictation_debug_mode={settings.get('user.dictation_debug_mode')}"
+            )
+
+            for line in _element_summary(el):
+                print(line)
+
+            for line in _span_text_window(
+                "raw AXValue context",
+                raw_context.content,
+                raw_context.selection,
+                radius,
+            ):
+                print(line)
+
+            for line in _span_text_window(
+                "adjusted dictation context",
+                adjusted_context.content,
+                adjusted_context.selection,
+                radius,
+            ):
+                print(line)
+
+            if (
+                adjusted_context.content is not None
+                and adjusted_context.selection is not None
+            ):
+                print(
+                    "dictation_peek equivalent: "
+                    f"before={adjusted_context.left_context(radius)!r} "
+                    f"after={adjusted_context.right_context(radius)!r}"
+                )
+            else:
+                print("dictation_peek equivalent: accessibility fallback")
+
+            for line in chromium_text_model_debug_lines(el, raw_context):
+                print(line)
+
+            for line in _tree_lines(el, tree_depth, max_nodes):
+                print(line)
+            print("=== end axkit dictation context debug ===\n")
+        except Exception as e:
+            print(f'Exception while debugging dictation context: "{e}":')
             traceback.print_exc()
 
 
