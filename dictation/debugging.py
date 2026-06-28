@@ -62,11 +62,28 @@ def _span_text_window(label, content, selection, radius):
     if selection is None:
         return [f"{label}: selection=None content_len={len(content)}"]
 
+    if selection.left == selection.right:
+        return [
+            f"{label}: content_len={len(content)} selection={selection}",
+            f"  caret_window={_text_excerpt(content, selection.left, radius)}",
+        ]
+
     return [
         f"{label}: content_len={len(content)} selection={selection}",
-        f"  before={_text_excerpt(content, selection.left, radius)}",
+        f"  window_around_selection_start={_text_excerpt(content, selection.left, radius)}",
         f"  selected={repr(content[selection.left : selection.right])}",
-        f"  after={_text_excerpt(content, selection.right, radius)}",
+        f"  window_around_selection_end={_text_excerpt(content, selection.right, radius)}",
+    ]
+
+
+def _dictation_peek_lines(context, radius):
+    if context.content is None or context.selection is None:
+        return ["dictation_peek equivalent: accessibility fallback"]
+
+    return [
+        "dictation_peek equivalent:",
+        f"  left_context={context.left_context(radius)!r}",
+        f"  right_context={context.right_context(radius)!r}",
     ]
 
 
@@ -220,17 +237,8 @@ class Actions:
             ):
                 print(line)
 
-            if (
-                adjusted_context.content is not None
-                and adjusted_context.selection is not None
-            ):
-                print(
-                    "dictation_peek equivalent: "
-                    f"before={adjusted_context.left_context(radius)!r} "
-                    f"after={adjusted_context.right_context(radius)!r}"
-                )
-            else:
-                print("dictation_peek equivalent: accessibility fallback")
+            for line in _dictation_peek_lines(adjusted_context, radius):
+                print(line)
 
             for line in chromium_text_model_debug_lines(el, raw_context):
                 print(line)
