@@ -87,6 +87,35 @@ def _dictation_peek_lines(context, radius):
     ]
 
 
+def _ax_string_for_range(el, start, end):
+    try:
+        return el["AXStringForRange"][Span(start, end)]
+    except Exception as error:
+        return f"<{type(error).__name__}: {error}>"
+
+
+def _ax_string_for_range_lines(el, context, radius):
+    if context.content is None or context.selection is None:
+        return ["AXStringForRange around raw selection: unavailable"]
+    if "AXStringForRange" not in el.parameterized_attrs:
+        return ["AXStringForRange around raw selection: not supported"]
+
+    content_length = len(context.content)
+    selection = context.selection
+    left_start = max(0, selection.left - radius)
+    right_end = min(content_length, selection.right + radius)
+
+    return [
+        "AXStringForRange around raw selection:",
+        f"  left_range=<{left_start}-{selection.left}> "
+        f"left_string={_ax_string_for_range(el, left_start, selection.left)!r}",
+        f"  selected_range=<{selection.left}-{selection.right}> "
+        f"selected_string={_ax_string_for_range(el, selection.left, selection.right)!r}",
+        f"  right_range=<{selection.right}-{right_end}> "
+        f"right_string={_ax_string_for_range(el, selection.right, right_end)!r}",
+    ]
+
+
 def _raw_context_from_element(el):
     selection = _safe_get(el, "AXSelectedTextRange")
     if selection is None or not hasattr(selection, "a"):
@@ -238,6 +267,9 @@ class Actions:
                 print(line)
 
             for line in _dictation_peek_lines(adjusted_context, radius):
+                print(line)
+
+            for line in _ax_string_for_range_lines(el, raw_context, radius):
                 print(line)
 
             for line in chromium_text_model_debug_lines(el, raw_context):
