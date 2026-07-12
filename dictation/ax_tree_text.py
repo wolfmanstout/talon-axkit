@@ -67,13 +67,18 @@ class AxTextSegment:
     peek_text: contribution to the text we report to the dictation formatter.
     offset_text: contribution to the AXSelectedTextRange coordinate space,
         measured in UTF-16 code units.
-    bias_after: when the caret lands exactly before this segment, report the
-        position after its peek_text instead (used for empty-paragraph line
-        breaks, so a caret on a blank line sees the preceding newline).
+    ambiguous_before: a selection offset immediately before this segment can
+        represent either side of the segment. The model falls back rather than
+        guessing when a selection endpoint lands there.
     """
 
     def __init__(
-        self, ax_text, peek_text=None, offset_text=None, kind=TEXT, bias_after=False
+        self,
+        ax_text,
+        peek_text=None,
+        offset_text=None,
+        kind=TEXT,
+        ambiguous_before=False,
     ):
         self.ax_text = ax_text
         if peek_text is None:
@@ -83,7 +88,7 @@ class AxTextSegment:
         self.peek_text = peek_text
         self.offset_text = offset_text
         self.kind = kind
-        self.bias_after = bias_after
+        self.ambiguous_before = ambiguous_before
 
 
 class _ListInfo:
@@ -208,9 +213,11 @@ class _TreeModel:
         pieces = []
         _collect_inline(child, pieces)
         if not pieces:
-            # Empty paragraph: one offset unit for its <br>, rendered '\n'.
+            # Empty groups represent <br>s. Chromium conflates a caret before
+            # the <br> with one after it, so the boundary cannot be mapped
+            # reliably from AXSelectedTextRange alone.
             self.segments.append(
-                AxTextSegment("\n", offset_text="\n", kind=BR, bias_after=True)
+                AxTextSegment("\n", offset_text="\n", kind=BR, ambiguous_before=True)
             )
             return False, False
         self.segments.extend(_inline_segments(pieces))
@@ -255,8 +262,6 @@ def offset_to_text_index(segments, offset):
         offset_units = utf16_len(segment.offset_text)
         if offset_units:
             if remaining <= 0:
-                if segment.bias_after:
-                    return text_index + len(segment.peek_text)
                 return text_index
             if remaining < offset_units:
                 if segment.offset_text == segment.peek_text:
@@ -275,6 +280,16 @@ def _offset_units_before(segments, index):
 
 def _ax_units_before(segments, index):
     return sum(utf16_len(segment.ax_text) for segment in segments[:index])
+
+
+def _selection_touches_ambiguous_boundary(segments, selection):
+    position = 0
+    ambiguous_offsets = set()
+    for segment in segments:
+        if segment.ambiguous_before:
+            ambiguous_offsets.add(position)
+        position += utf16_len(segment.offset_text)
+    return selection.left in ambiguous_offsets or selection.right in ambiguous_offsets
 
 
 def _is_unreachable_offset(segments, value):
@@ -349,6 +364,10 @@ def apply_chromium_text_model(el, context):
         if resolution is not None:
             selection = Span(resolution, resolution)
 
+    if _selection_touches_ambiguous_boundary(segments, selection):
+        context.content = None
+        return context
+
     context.content = segment_text(segments, "peek_text")
     context.selection = Span(
         offset_to_text_index(segments, selection.left),
@@ -389,10 +408,12 @@ def chromium_text_model_debug_lines(el, context=None, max_segments=160):
             lines.append("  selection=None")
         else:
             lines.append(f"  raw_selection={selection}")
+            selection_falls_back = False
             if selection.left == selection.right:
                 resolution = _resolve_collapsed_selection(model, selection.left)
                 if resolution is _FALLBACK:
                     lines.append("  collapsed_selection_resolution=FALLBACK")
+                    selection_falls_back = True
                 elif resolution is None:
                     lines.append("  collapsed_selection_resolution=unchanged")
                 else:
@@ -400,11 +421,15 @@ def chromium_text_model_debug_lines(el, context=None, max_segments=160):
                         f"  collapsed_selection_resolution=remap_to_{resolution}"
                     )
                     selection = Span(resolution, resolution)
-            lines.append(
-                "  mapped_selection="
-                f"<{offset_to_text_index(segments, selection.left)}-"
-                f"{offset_to_text_index(segments, selection.right)}>"
-            )
+            if _selection_touches_ambiguous_boundary(segments, selection):
+                lines.append("  selection_resolution=FALLBACK_AMBIGUOUS_BOUNDARY")
+                selection_falls_back = True
+            if not selection_falls_back:
+                lines.append(
+                    "  mapped_selection="
+                    f"<{offset_to_text_index(segments, selection.left)}-"
+                    f"{offset_to_text_index(segments, selection.right)}>"
+                )
 
     lines.append("  segment table:")
     ax_units = 0
@@ -415,7 +440,8 @@ def chromium_text_model_debug_lines(el, context=None, max_segments=160):
         segment_offset_units = utf16_len(segment.offset_text)
         lines.append(
             "    "
-            f"{index:03d} kind={segment.kind} bias_after={segment.bias_after} "
+            f"{index:03d} kind={segment.kind} "
+            f"ambiguous_before={segment.ambiguous_before} "
             f"ax[{ax_units}:{ax_units + segment_ax_units}] "
             f"peek[{peek_index}:{peek_index + len(segment.peek_text)}] "
             f"offset[{offset_units}:{offset_units + segment_offset_units}] "

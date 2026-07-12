@@ -55,6 +55,9 @@ and `'X'` + two blank lines + `'Y'` renders as `'X\n\nY'` (the two `\n` are the
 Consequences:
 
 - End-of-paragraph N and start-of-paragraph N+1 share an offset (conflated).
+- Gmail can also expose a separating `<br>` that occupies one offset unit,
+  while reporting the same boundary offset for a caret immediately before or
+  after it. These boundary positions are likewise ambiguous.
 - Selection offsets drift from `AXValue` indices by one per block boundary;
   a caret at end-of-document reports e.g. `<22-22>` for a 23-char `AXValue`
   (two paragraphs) or `<369-369>` for a 409-char one (41 paragraphs).
@@ -125,4 +128,6 @@ method), then translates `AXSelectedTextRange` through the offset-space
 rendering, in UTF-16 units. Bogus empty-list-item selections are remapped to
 the empty item when the reported value is provably unreachable (inside a
 marker, or 0 in a marker-first document) and there is exactly one candidate
-empty item; otherwise they force a fallback.
+empty item; otherwise they force a fallback. Selection endpoints at conflated
+`<br>` boundaries also force a fallback because the AX data cannot identify
+which visual side contains the caret.
