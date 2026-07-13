@@ -97,6 +97,12 @@ class _ListInfo:
         self.empty_br_indices = []
 
 
+class _BlockInfo:
+    def __init__(self, el, segments):
+        self.el = el
+        self.segments = segments
+
+
 def _text_segment(value):
     # Gmail substitutes U+00A0 for spaces around formatting boundaries; keep
     # AXValue verbatim but report a plain space to the dictation formatter.
@@ -149,6 +155,7 @@ class _TreeModel:
     def __init__(self):
         self.segments = []
         self.lists = []
+        self.blocks = []
 
     def _add_list_item(self, item, is_last_in_list, list_info):
         marker = None
@@ -234,6 +241,7 @@ class _TreeModel:
         # adjacent content-bearing children, and never between two inline runs.
         start = len(self.segments)
         has_content, inline = self._add_block(child)
+        block_segments = self.segments[start:]
         if (
             previous is not None
             and previous[0]
@@ -247,6 +255,7 @@ class _TreeModel:
                     list_info.empty_br_indices = [
                         index + 1 for index in list_info.empty_br_indices
                     ]
+        self.blocks.append(_BlockInfo(child, block_segments))
         return has_content, inline
 
 
@@ -290,6 +299,64 @@ def _selection_touches_ambiguous_boundary(segments, selection):
             ambiguous_offsets.add(position)
         position += utf16_len(segment.offset_text)
     return selection.left in ambiguous_offsets or selection.right in ambiguous_offsets
+
+
+def _selected_block_boundary_resolution(model):
+    """Resolve a conflated break boundary from descendant selection state.
+
+    Chromium exposes a local AXSelectedTextRanges value on the top-level block
+    that actually owns the caret, even when the text area's range conflates the
+    two sides of a <br> or becomes otherwise bogus.
+    """
+    selected_blocks = []
+    for block_index, block in enumerate(model.blocks):
+        try:
+            ranges = block.el.get("AXSelectedTextRanges")
+        except Exception:
+            continue
+        if ranges is not None:
+            selected_blocks.append((block_index, block, ranges))
+
+    if len(selected_blocks) != 1:
+        return None
+
+    block_index, block, ranges = selected_blocks[0]
+    if len(ranges) != 1 or ranges[0].left != ranges[0].right or not block.segments:
+        return None
+
+    local_selection = ranges[0]
+    segment_indices = {
+        id(segment): index for index, segment in enumerate(model.segments)
+    }
+    first_index = segment_indices[id(block.segments[0])]
+    peek_start = sum(len(segment.peek_text) for segment in model.segments[:first_index])
+
+    if all(segment.kind == BR for segment in block.segments) and any(
+        segment.ambiguous_before for segment in block.segments
+    ):
+        # A selected empty block means the caret is on that visual line, after
+        # the newline represented by its <br> in peek text.
+        local_peek_index = sum(len(segment.peek_text) for segment in block.segments)
+    else:
+        local_offset_units = sum(
+            utf16_len(segment.offset_text) for segment in block.segments
+        )
+        if not 0 <= local_selection.left <= local_offset_units:
+            return None
+        local_peek_index = offset_to_text_index(block.segments, local_selection.left)
+
+    peek_index = peek_start + local_peek_index
+    ambiguous_boundaries = set()
+    segment_peek_start = 0
+    for segment in model.segments:
+        if segment.ambiguous_before:
+            ambiguous_boundaries.add(segment_peek_start)
+            ambiguous_boundaries.add(segment_peek_start + len(segment.peek_text))
+        segment_peek_start += len(segment.peek_text)
+
+    if peek_index not in ambiguous_boundaries:
+        return None
+    return block_index, local_selection, peek_index
 
 
 def _is_unreachable_offset(segments, value):
@@ -357,6 +424,14 @@ def apply_chromium_text_model(el, context):
 
     selection = context.selection
     if selection.left == selection.right:
+        block_resolution = _selected_block_boundary_resolution(model)
+        if block_resolution is not None:
+            _, _, peek_index = block_resolution
+            context.content = segment_text(segments, "peek_text")
+            context.selection = Span(peek_index, peek_index)
+            return context
+
+    if selection.left == selection.right:
         resolution = _resolve_collapsed_selection(model, selection.left)
         if resolution is _FALLBACK:
             context.content = None
@@ -409,27 +484,41 @@ def chromium_text_model_debug_lines(el, context=None, max_segments=160):
         else:
             lines.append(f"  raw_selection={selection}")
             selection_falls_back = False
+            block_resolution = None
             if selection.left == selection.right:
-                resolution = _resolve_collapsed_selection(model, selection.left)
-                if resolution is _FALLBACK:
-                    lines.append("  collapsed_selection_resolution=FALLBACK")
+                block_resolution = _selected_block_boundary_resolution(model)
+                if block_resolution is not None:
+                    block_index, local_selection, peek_index = block_resolution
+                    lines.append(
+                        "  selected_block_boundary_resolution="
+                        f"block_{block_index}_local_{local_selection}_to_peek_{peek_index}"
+                    )
+                    selection = Span(peek_index, peek_index)
+                else:
+                    resolution = _resolve_collapsed_selection(model, selection.left)
+                    if resolution is _FALLBACK:
+                        lines.append("  collapsed_selection_resolution=FALLBACK")
+                        selection_falls_back = True
+                    elif resolution is None:
+                        lines.append("  collapsed_selection_resolution=unchanged")
+                    else:
+                        lines.append(
+                            f"  collapsed_selection_resolution=remap_to_{resolution}"
+                        )
+                        selection = Span(resolution, resolution)
+            if block_resolution is None:
+                if _selection_touches_ambiguous_boundary(segments, selection):
+                    lines.append("  selection_resolution=FALLBACK_AMBIGUOUS_BOUNDARY")
                     selection_falls_back = True
-                elif resolution is None:
-                    lines.append("  collapsed_selection_resolution=unchanged")
+            if not selection_falls_back:
+                if block_resolution is not None:
+                    lines.append(f"  mapped_selection={selection}")
                 else:
                     lines.append(
-                        f"  collapsed_selection_resolution=remap_to_{resolution}"
+                        "  mapped_selection="
+                        f"<{offset_to_text_index(segments, selection.left)}-"
+                        f"{offset_to_text_index(segments, selection.right)}>"
                     )
-                    selection = Span(resolution, resolution)
-            if _selection_touches_ambiguous_boundary(segments, selection):
-                lines.append("  selection_resolution=FALLBACK_AMBIGUOUS_BOUNDARY")
-                selection_falls_back = True
-            if not selection_falls_back:
-                lines.append(
-                    "  mapped_selection="
-                    f"<{offset_to_text_index(segments, selection.left)}-"
-                    f"{offset_to_text_index(segments, selection.right)}>"
-                )
 
     lines.append("  segment table:")
     ax_units = 0
