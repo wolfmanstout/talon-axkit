@@ -2,7 +2,7 @@ import time
 import traceback
 from dataclasses import replace
 
-from talon import Module, actions, cron, noise, settings, ui
+from talon import Module, actions, cron, settings, ui
 from talon.types import Span
 
 from .ax_tree_text import chromium_text_model_debug_lines
@@ -328,4 +328,4 @@ def on_hiss(noise_active: bool):
         stop_hiss()
 
 
-noise.register("hiss", on_hiss)
+# noise.register("hiss", on_hiss)
