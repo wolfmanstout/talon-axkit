@@ -32,6 +32,7 @@ index into the string returned by `AXValue`. In these editors they do not:
 | Text leaf (`AXStaticText`)                                                                                          | its text (with U+00A0 substituted around inline-formatting boundaries in Gmail) |
 | Boundary between two adjacent non-empty blocks                                                                      | `\n`                                                                            |
 | Boundary between adjacent top-level _inline_ runs (Gmail hoists the first paragraph's styled runs to the top level) | nothing                                                                         |
+| Literal newline between adjacent top-level inline runs                                                              | `\n`                                                                            |
 | Empty paragraph (`<div><br></div>` → empty `AXGroup`)                                                               | `\n`; boundaries adjacent to it contribute nothing                              |
 | List marker (`AXListMarker`)                                                                                        | its text verbatim (`'• '`, `'◦ '`, `'1. '`)                                     |
 | Empty list item's `<br>`                                                                                            | `\n` only when the item is the **last** item of its list                        |
@@ -50,6 +51,7 @@ and `'X'` + two blank lines + `'Y'` renders as `'X\n\nY'` (the two `\n` are the
 | List marker                              | full marker text (2 for `'• '`) — caret cannot sit inside or before it |
 | Empty paragraph / empty list item `<br>` | 1 (for empty list items, even when `AXValue` renders nothing)          |
 | Inter-block `\n` separators              | 0                                                                      |
+| Literal newline between inline leaves    | 1                                                                      |
 | Inline images                            | 0                                                                      |
 
 Consequences:
@@ -126,11 +128,19 @@ there — useful both for detection and for a bug report.
 It rebuilds both renderings from the AX tree, validates the value-space
 rendering against `AXValue` exactly (any mismatch → fall back to the keystroke
 method), then translates `AXSelectedTextRange` through the offset-space
-rendering, in UTF-16 units. Bogus empty-list-item selections are remapped to
-the empty item when the reported value is provably unreachable (inside a
-marker, or 0 in a marker-first document) and there is exactly one candidate
-empty item; otherwise they force a fallback. At conflated `<br>` boundaries,
-the mapper uses `AXSelectedTextRanges` from the selected top-level descendant:
-a caret at the end of a populated block maps before the break, while a caret
-owned by the empty block maps after it. It falls back when that descendant
-signal is missing or inconsistent.
+rendering, in UTF-16 units. Bogus empty-list-item selections are remapped when
+exactly one empty item's own `AXSelectedTextRanges` identifies it and places
+the local caret immediately after its marker. This also resolves nested empty
+items, for which the root range is otherwise indistinguishable from the list's
+start. A conservative offset heuristic handles older trees that lack that
+descendant signal; ambiguous cases still fall back. At conflated `<br>`
+boundaries, the mapper uses `AXSelectedTextRanges` from the selected top-level
+descendant: a caret at the end of a populated block maps before the break,
+while a caret owned by the empty block maps after it. It falls back when that
+descendant signal is missing or inconsistent.
+
+Adjacent top-level inline leaves normally concatenate, as Gmail uses them for
+formatting runs. When the reconstructed prefix and root `AXValue` instead show
+a literal newline between two such leaves, the mapper preserves it in both
+value and offset space. This covers multiline text inserted as newline-bearing
+text rather than as paragraph blocks.

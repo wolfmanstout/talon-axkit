@@ -103,6 +103,13 @@ class _BlockInfo:
         self.segments = segments
 
 
+class _EmptyListItemInfo:
+    def __init__(self, el, marker, br_segment):
+        self.el = el
+        self.marker = marker
+        self.br_segment = br_segment
+
+
 def _text_segment(value):
     # Gmail substitutes U+00A0 for spaces around formatting boundaries; keep
     # AXValue verbatim but report a plain space to the dictation formatter.
@@ -156,6 +163,7 @@ class _TreeModel:
         self.segments = []
         self.lists = []
         self.blocks = []
+        self.empty_list_items = []
 
     def _add_list_item(self, item, is_last_in_list, list_info):
         marker = None
@@ -183,6 +191,7 @@ class _TreeModel:
         )
         list_info.empty_br_indices.append(len(self.segments))
         self.segments.append(br)
+        self.empty_list_items.append(_EmptyListItemInfo(item, marker or "", br))
 
     def _add_list(self, list_el):
         list_info = _ListInfo(len(self.segments))
@@ -230,25 +239,45 @@ class _TreeModel:
         self.segments.extend(_inline_segments(pieces))
         return _has_content(pieces), False
 
-    def build(self, el):
+    def build(self, el, ax_value=None):
         previous = None  # (has_content, inline) of previous child
         for child in list(el.children):
-            previous = self._add_block_with_separator(child, previous)
+            previous = self._add_block_with_separator(child, previous, ax_value)
         return self
 
-    def _add_block_with_separator(self, child, previous):
+    def _add_block_with_separator(self, child, previous, ax_value):
         # Decide whether a separator precedes this child: only between two
-        # adjacent content-bearing children, and never between two inline runs.
+        # adjacent content-bearing children. Adjacent inline runs normally
+        # concatenate, but literal line breaks inserted into Gmail are exposed
+        # as separate top-level leaves with the newline present only at the
+        # root. In that case the newline is part of offset space too.
         start = len(self.segments)
         has_content, inline = self._add_block(child)
         block_segments = self.segments[start:]
-        if (
+        structural_separator = (
             previous is not None
             and previous[0]
             and has_content
             and not (previous[1] and inline)
+        )
+        inline_line_break = False
+        if (
+            ax_value is not None
+            and previous is not None
+            and previous[0]
+            and has_content
+            and previous[1]
+            and inline
         ):
-            self.segments.insert(start, AxTextSegment("\n", offset_text="", kind=SEP))
+            prefix = segment_text(self.segments[:start], "ax_text")
+            block_text = segment_text(block_segments, "ax_text")
+            inline_line_break = ax_value.startswith(prefix + "\n" + block_text)
+
+        if structural_separator or inline_line_break:
+            offset_text = "\n" if inline_line_break else ""
+            self.segments.insert(
+                start, AxTextSegment("\n", offset_text=offset_text, kind=SEP)
+            )
             for list_info in self.lists:
                 if list_info.start_index >= start:
                     list_info.start_index += 1
@@ -359,6 +388,42 @@ def _selected_block_boundary_resolution(model):
     return block_index, local_selection, peek_index
 
 
+def _selected_empty_list_item_resolution(model):
+    """Resolve Chromium's bogus root range from the selected empty list item.
+
+    The empty item's own AXSelectedTextRanges is local to the item and places
+    the caret immediately after its marker. That ownership signal remains
+    accurate when the root range points at the containing list's start.
+    """
+    selected_items = []
+    for item_index, info in enumerate(model.empty_list_items):
+        try:
+            ranges = info.el.get("AXSelectedTextRanges")
+        except Exception:
+            continue
+        if ranges is not None:
+            selected_items.append((item_index, info, ranges))
+
+    if len(selected_items) != 1:
+        return None
+
+    item_index, info, ranges = selected_items[0]
+    if len(ranges) != 1 or ranges[0].left != ranges[0].right:
+        return None
+
+    local_selection = ranges[0]
+    expected_offset = utf16_len(info.marker)
+    if local_selection.left != expected_offset:
+        return None
+
+    try:
+        br_index = model.segments.index(info.br_segment)
+    except ValueError:
+        return None
+    peek_index = sum(len(segment.peek_text) for segment in model.segments[:br_index])
+    return item_index, local_selection, peek_index
+
+
 def _is_unreachable_offset(segments, value):
     """True if no legitimate caret can sit at `value` in offset space."""
     if value == 0:
@@ -414,7 +479,7 @@ def apply_chromium_text_model(el, context):
 
     On any mismatch sets context.content to None so the caller falls back.
     """
-    model = _TreeModel().build(el)
+    model = _TreeModel().build(el, context.content)
     segments = model.segments
 
     ax_text = segment_text(segments, "ax_text")
@@ -427,6 +492,13 @@ def apply_chromium_text_model(el, context):
         block_resolution = _selected_block_boundary_resolution(model)
         if block_resolution is not None:
             _, _, peek_index = block_resolution
+            context.content = segment_text(segments, "peek_text")
+            context.selection = Span(peek_index, peek_index)
+            return context
+
+        empty_item_resolution = _selected_empty_list_item_resolution(model)
+        if empty_item_resolution is not None:
+            _, _, peek_index = empty_item_resolution
             context.content = segment_text(segments, "peek_text")
             context.selection = Span(peek_index, peek_index)
             return context
@@ -462,7 +534,7 @@ def _repr_text(text, limit=80):
 
 def chromium_text_model_debug_lines(el, context=None, max_segments=160):
     """Return human-readable diagnostics for the Chromium AX text model."""
-    model = _TreeModel().build(el)
+    model = _TreeModel().build(el, context.content if context is not None else None)
     segments = model.segments
     ax_text = segment_text(segments, "ax_text")
     peek_text = segment_text(segments, "peek_text")
@@ -479,12 +551,15 @@ def chromium_text_model_debug_lines(el, context=None, max_segments=160):
     if context is not None:
         lines.append(f"  validates_ax_value={ax_text == context.content}")
         selection = context.selection
-        if selection is None:
+        if ax_text != context.content:
+            lines.append("  selection_resolution=SKIPPED_AX_VALUE_MISMATCH")
+        elif selection is None:
             lines.append("  selection=None")
         else:
             lines.append(f"  raw_selection={selection}")
             selection_falls_back = False
             block_resolution = None
+            empty_item_resolution = None
             if selection.left == selection.right:
                 block_resolution = _selected_block_boundary_resolution(model)
                 if block_resolution is not None:
@@ -495,23 +570,32 @@ def chromium_text_model_debug_lines(el, context=None, max_segments=160):
                     )
                     selection = Span(peek_index, peek_index)
                 else:
-                    resolution = _resolve_collapsed_selection(model, selection.left)
-                    if resolution is _FALLBACK:
-                        lines.append("  collapsed_selection_resolution=FALLBACK")
-                        selection_falls_back = True
-                    elif resolution is None:
-                        lines.append("  collapsed_selection_resolution=unchanged")
-                    else:
+                    empty_item_resolution = _selected_empty_list_item_resolution(model)
+                    if empty_item_resolution is not None:
+                        item_index, local_selection, peek_index = empty_item_resolution
                         lines.append(
-                            f"  collapsed_selection_resolution=remap_to_{resolution}"
+                            "  selected_empty_list_item_resolution="
+                            f"item_{item_index}_local_{local_selection}_to_peek_{peek_index}"
                         )
-                        selection = Span(resolution, resolution)
-            if block_resolution is None:
+                        selection = Span(peek_index, peek_index)
+                    else:
+                        resolution = _resolve_collapsed_selection(model, selection.left)
+                        if resolution is _FALLBACK:
+                            lines.append("  collapsed_selection_resolution=FALLBACK")
+                            selection_falls_back = True
+                        elif resolution is None:
+                            lines.append("  collapsed_selection_resolution=unchanged")
+                        else:
+                            lines.append(
+                                f"  collapsed_selection_resolution=remap_to_{resolution}"
+                            )
+                            selection = Span(resolution, resolution)
+            if block_resolution is None and empty_item_resolution is None:
                 if _selection_touches_ambiguous_boundary(segments, selection):
                     lines.append("  selection_resolution=FALLBACK_AMBIGUOUS_BOUNDARY")
                     selection_falls_back = True
             if not selection_falls_back:
-                if block_resolution is not None:
+                if block_resolution is not None or empty_item_resolution is not None:
                     lines.append(f"  mapped_selection={selection}")
                 else:
                     lines.append(
